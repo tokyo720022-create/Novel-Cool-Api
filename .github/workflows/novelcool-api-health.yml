@@ -1,0 +1,153 @@
+name: NovelCool API Health Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Once a day to verify that NovelCool's pages are still scrapeable.
+    - cron: "17 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.js"
+      - "package.json"
+      - "package-lock.json"
+      - "vercel.json"
+      - ".github/workflows/novelcool-api-health.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            echo "Checking $file"
+            node --check "$file"
+          done < <(find . -path './node_modules' -prune -o -type f -name '*.js' -print0)
+
+      - name: Start API server
+        run: |
+          nohup node index.js > /tmp/novelcool-api.log 2>&1 &
+          echo $! > /tmp/novelcool-api.pid
+
+      - name: Wait for API server
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl --silent --show-error --fail http://127.0.0.1:1234/ -o /tmp/novelcool-root.json; then
+              cat /tmp/novelcool-root.json
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API server did not start. Server log:"
+          cat /tmp/novelcool-api.log
+          exit 1
+
+      - name: Smoke-test core API endpoints
+        run: |
+          node --input-type=module <<'NODE'
+          const base = 'http://127.0.0.1:1234/api/v1';
+
+          async function getJson(path) {
+            console.log(`Checking ${path}`);
+            const response = await fetch(`${base}${path}`, {
+              signal: AbortSignal.timeout(45000),
+              headers: { accept: 'application/json' },
+            });
+
+            if (!response.ok) {
+              const body = await response.text();
+              throw new Error(`${path} returned HTTP ${response.status}: ${body.slice(0, 300)}`);
+            }
+
+            try {
+              return await response.json();
+            } catch {
+              throw new Error(`${path} did not return valid JSON`);
+            }
+          }
+
+          const index = await getJson('/index');
+          if (!Array.isArray(index) || index.length === 0) {
+            throw new Error('/index returned no section list');
+          }
+          const indexMangaCount = index.reduce(
+            (count, section) => count + (Array.isArray(section?.mangaList) ? section.mangaList.length : 0),
+            0,
+          );
+          if (indexMangaCount === 0) {
+            throw new Error('/index returned no manga items');
+          }
+          console.log(`PASS /index — ${index.length} sections, ${indexMangaCount} manga items`);
+
+          const latest = await getJson('/lasted');
+          if (!Array.isArray(latest?.result) || latest.result.length === 0) {
+            throw new Error('/lasted returned no latest manga items');
+          }
+          console.log(`PASS /lasted — ${latest.result.length} manga items`);
+
+          const search = await getJson('/search?query=One%20Piece');
+          if (!Array.isArray(search?.body?.result)) {
+            throw new Error('/search response does not contain body.result array');
+          }
+          console.log(`PASS /search — ${search.body.result.length} results for "One Piece"`);
+
+          const genres = await getJson('/info/genres');
+          if (!Array.isArray(genres?.Genres) || genres.Genres.length === 0) {
+            throw new Error('/info/genres returned no genres');
+          }
+          console.log(`PASS /info/genres — ${genres.Genres.length} genres`);
+
+          const candidates = latest.result
+            .filter((manga) => typeof manga?.id === 'string' && manga.id.length > 0)
+            .slice(0, 3);
+          if (candidates.length === 0) {
+            throw new Error('/lasted did not include a manga ID for detail lookup');
+          }
+
+          let detail;
+          let lastDetailError;
+          for (const manga of candidates) {
+            try {
+              const candidate = await getJson(`/view/${encodeURIComponent(manga.id)}`);
+              if (
+                typeof candidate?.title === 'string' && candidate.title.trim() &&
+                Array.isArray(candidate.chaptersList) && candidate.chaptersList.length > 0
+              ) {
+                detail = candidate;
+                break;
+              }
+              lastDetailError = new Error(`/view/${manga.id} returned no title or chapter list`);
+            } catch (error) {
+              lastDetailError = error;
+            }
+          }
+
+          if (!detail) {
+            throw new Error(`Could not load manga details with chapters: ${lastDetailError?.message ?? 'unknown error'}`);
+          }
+          console.log(`PASS /view — "${detail.title}" with ${detail.chaptersList.length} chapters listed`);
+          console.log('All NovelCool API smoke checks passed.');
+          NODE
+
+      - name: Show server log if a step fails
+        if: failure()
+        run: cat /tmp/novelcool-api.log || true
