@@ -1,0 +1,124 @@
+name: Extract Uploaded ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - '*.zip'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: unzip-source-archive-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Extract ZIP into repository root
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import os
+          import shutil
+          import tempfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          repo = Path.cwd()
+          archives = [p for p in repo.glob("*.zip") if p.is_file()]
+
+          if len(archives) != 1:
+              raise SystemExit(
+                  f"Expected exactly one .zip archive in the repository root; found {len(archives)}. "
+                  "Keep one source ZIP at the root, then run this workflow again."
+              )
+
+          archive = archives[0]
+          temp_root = Path(tempfile.mkdtemp(prefix="repo-zip-"))
+          extracted = temp_root / "contents"
+          extracted.mkdir()
+
+          try:
+              with zipfile.ZipFile(archive) as zf:
+                  members = zf.infolist()
+                  for member in members:
+                      # Reject absolute paths and traversal entries before extraction.
+                      raw_name = member.filename.replace("\\", "/")
+                      path = PurePosixPath(raw_name)
+                      if path.is_absolute() or ".." in path.parts or (path.parts and ":" in path.parts[0]):
+                          raise SystemExit(f"Unsafe path found in ZIP: {member.filename}")
+                  zf.extractall(extracted)
+
+              # GitHub source ZIPs commonly wrap all files in one folder, e.g. repo-main/.
+              visible = [p for p in extracted.iterdir() if p.name not in {"__MACOSX", ".DS_Store"}]
+              if len(visible) == 1 and visible[0].is_dir():
+                  source = visible[0]
+              else:
+                  source = extracted
+
+              copied = 0
+              for item in source.iterdir():
+                  if item.name in {".git", archive.name}:
+                      continue
+                  destination = repo / item.name
+
+                  # Never let an uploaded archive replace this extraction workflow.
+                  if item.is_dir() and item.name == ".github":
+                      for root, dirs, files in os.walk(item):
+                          rel_root = Path(root).relative_to(item)
+                          target_root = destination / rel_root
+                          target_root.mkdir(parents=True, exist_ok=True)
+                          dirs[:] = [d for d in dirs if d != ".git"]
+                          for filename in files:
+                              src_file = Path(root) / filename
+                              rel_file = src_file.relative_to(item)
+                              if rel_file.as_posix() == "workflows/unzip.yml":
+                                  continue
+                              dst_file = destination / rel_file
+                              dst_file.parent.mkdir(parents=True, exist_ok=True)
+                              shutil.copy2(src_file, dst_file)
+                              copied += 1
+                  elif item.is_dir():
+                      shutil.copytree(item, destination, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+                      copied += sum(1 for p in item.rglob("*") if p.is_file())
+                  else:
+                      shutil.copy2(item, destination)
+                      copied += 1
+
+              if copied == 0:
+                  raise SystemExit("The ZIP did not contain any files to extract.")
+
+              # Remove the uploaded archive so the repository keeps the source files, not the ZIP too.
+              archive.unlink()
+              print(f"Extracted {copied} file(s) from {archive.name} into the repository root.")
+          finally:
+              shutil.rmtree(temp_root, ignore_errors=True)
+          PY
+
+      - name: Commit extracted source files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No extracted changes to commit."
+            exit 0
+          fi
+          git commit -m "Extract uploaded source ZIP"
+          git push
