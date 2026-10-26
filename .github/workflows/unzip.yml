@@ -86,8 +86,9 @@ jobs:
                           for filename in files:
                               src_file = Path(root) / filename
                               rel_file = src_file.relative_to(item)
-                              if rel_file.as_posix() == "workflows/unzip.yml":
-                                  continue
+                              # Keep workflows from the uploaded ZIP out of the repository.
+if rel_file.parts and rel_file.parts[0] == "workflows":
+    continue
                               dst_file = destination / rel_file
                               dst_file.parent.mkdir(parents=True, exist_ok=True)
                               shutil.copy2(src_file, dst_file)
