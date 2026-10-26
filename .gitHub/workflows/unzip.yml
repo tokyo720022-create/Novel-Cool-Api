@@ -1,0 +1,30 @@
+name: Unpack site.zip
+on:
+  push:
+    paths: ["site.zip"]
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack into folders
+        run: |
+          test -f site.zip || { echo "site.zip was not found in the repo root"; exit 1; }
+          rm -f js-*.js css-*.css view-*.html icon.svg
+          unzip -o site.zip
+          rm site.zip
+      - name: Commit
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Unpack site.zip" || echo "Nothing to commit"
+          git push
+      - name: Start the APK build if this repo has one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-apk.yml || true
