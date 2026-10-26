@@ -1,0 +1,290 @@
+name: Test NovelCool Manga Titles
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_title:
+        description: First manga title to search
+        required: true
+        type: string
+        default: "I massage my little sister every night"
+      second_title:
+        description: Second manga title to search
+        required: true
+        type: string
+        default: "A narrow-eyed gentle big-breasted mama"
+
+permissions:
+  contents: read
+
+jobs:
+  test-titles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(find . -path './node_modules' -prune -o -type f -name '*.js' -print0)
+
+      - name: Start local API
+        shell: bash
+        run: |
+          nohup node index.js > /tmp/novelcool-api.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail http://127.0.0.1:1234/ -o /tmp/api-root.json; then
+              cat /tmp/api-root.json
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/novelcool-api.log
+          exit 1
+
+      - name: Search titles and test details and reader
+        env:
+          TITLE_ONE: ${{ inputs.first_title }}
+          TITLE_TWO: ${{ inputs.second_title }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises';
+
+          const base = 'http://127.0.0.1:1234/api/v1';
+          const titles = [process.env.TITLE_ONE, process.env.TITLE_TWO].map(x => (x || '').trim()).filter(Boolean);
+          const reports = [];
+          const endpointFailures = [];
+
+          const normalize = value => String(value ?? '').normalize('NFKD')
+            .replace(/[\u0300-\u036f]/g, '').toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ').trim();
+
+          function similarity(query, value) {
+            const a = normalize(query), b = normalize(value);
+            if (!a || !b) return 0;
+            if (a === b) return 1;
+            if (a.includes(b) || b.includes(a)) return 0.95;
+            const aa = [...new Set(a.split(/\s+/))];
+            const bb = [...new Set(b.split(/\s+/))];
+            const overlap = aa.filter(token => bb.includes(token)).length;
+            return Number((0.75 * overlap / aa.length + 0.25 * overlap / new Set([...aa, ...bb]).size).toFixed(3));
+          }
+
+          async function getJson(path, timeoutMs = 90000) {
+            const response = await fetch(base + path, {
+              headers: { accept: 'application/json' },
+              signal: AbortSignal.timeout(timeoutMs),
+            });
+            const text = await response.text();
+            if (!response.ok) throw new Error(`HTTP ${response.status} for ${path}: ${text.slice(0, 250)}`);
+            try { return JSON.parse(text); }
+            catch { throw new Error(`Non-JSON response for ${path}: ${text.slice(0, 250)}`); }
+          }
+
+          for (const requestedTitle of titles) {
+            console.log(`\n${'='.repeat(72)}\nTITLE: ${requestedTitle}\n${'='.repeat(72)}`);
+            const report = {
+              requestedTitle,
+              searchStatus: 'NOT_RUN',
+              matchStatus: 'NOT_FOUND',
+              candidates: [],
+              details: null,
+              readerTest: { status: 'NOT_RUN' },
+              errors: [],
+            };
+
+            let search;
+            try {
+              search = await getJson(`/search?${new URLSearchParams({ query: requestedTitle })}`);
+              report.searchStatus = 'PASS';
+            } catch (error) {
+              report.searchStatus = 'FAIL';
+              report.errors.push(`Search request failed: ${error.message}`);
+              endpointFailures.push(`${requestedTitle}: search endpoint failed`);
+              reports.push(report);
+              console.error(report.errors.at(-1));
+              continue;
+            }
+
+            const results = Array.isArray(search?.body?.result) ? search.body.result
+              : Array.isArray(search?.result) ? search.result : [];
+            report.candidates = results.slice(0, 8).map(item => ({
+              id: item?.id ?? null,
+              title: item?.title ?? null,
+              author: item?.author ?? null,
+              similarity: similarity(requestedTitle, item?.title),
+            }));
+            console.log(`Search endpoint: PASS; results returned: ${results.length}`);
+            for (const result of report.candidates.slice(0, 8)) {
+              console.log(` - ${result.title ?? '(no title)'} | ID=${result.id ?? 'n/a'} | similarity=${result.similarity}`);
+            }
+
+            if (!results.length) {
+              report.matchStatus = 'NO_RESULTS';
+              console.log('No search matches. The API responded, but this title was not found by the source search.');
+              reports.push(report);
+              continue;
+            }
+
+            const ranked = results.filter(item => item && item.id != null && String(item.id).trim())
+              .map(item => ({ item, score: similarity(requestedTitle, item.title) }))
+              .sort((a, b) => b.score - a.score);
+            if (!ranked.length) {
+              report.matchStatus = 'RESULTS_WITHOUT_IDS';
+              reports.push(report);
+              continue;
+            }
+
+            const best = ranked[0];
+            report.matchStatus = normalize(requestedTitle) === normalize(best.item.title)
+              ? 'EXACT_MATCH' : best.score >= 0.5 ? 'CLOSE_CANDIDATE' : 'UNCONFIRMED_CANDIDATE';
+            console.log(`Selected result: ${best.item.title} (ID=${best.item.id}; score=${best.score}; ${report.matchStatus})`);
+
+            let detail;
+            try {
+              detail = await getJson(`/view/${encodeURIComponent(String(best.item.id))}`);
+            } catch (error) {
+              report.errors.push(`Detail request failed: ${error.message}`);
+              endpointFailures.push(`${requestedTitle}: detail endpoint failed`);
+              reports.push(report);
+              console.error(report.errors.at(-1));
+              continue;
+            }
+
+            const chapters = Array.isArray(detail?.chaptersList) ? detail.chaptersList : [];
+            report.details = {
+              id: String(best.item.id),
+              title: detail?.title ?? best.item.title ?? null,
+              titleSimilarity: best.score,
+              author: detail?.author ?? best.item.author ?? null,
+              type: detail?.bookType ?? best.item.typeManga ?? null,
+              description: detail?.description ?? best.item.description ?? null,
+              coverImageUrl: detail?.img ?? best.item.img ?? null,
+              genres: Array.isArray(detail?.genres) ? detail.genres : (Array.isArray(best.item.genres) ? best.item.genres : []),
+              rating: detail?.rate ?? best.item.bookRate ?? null,
+              views: detail?.views ?? best.item.views ?? null,
+              followers: detail?.followers ?? null,
+              chapterCount: chapters.length,
+              chapters: chapters.map(ch => ({
+                chapterId: ch?.chapterId ?? null,
+                title: ch?.chapterTitle ?? null,
+                date: ch?.chapterDate ?? null,
+                views: ch?.chapterViews ?? null,
+              })),
+            };
+
+            console.log('DETAILS: PASS');
+            for (const [label, value] of Object.entries({
+              Title: report.details.title,
+              Author: report.details.author,
+              Type: report.details.type,
+              Rating: report.details.rating,
+              Views: report.details.views,
+              Followers: report.details.followers,
+              Genres: report.details.genres.join(', '),
+              'Cover image URL': report.details.coverImageUrl,
+              Description: report.details.description,
+              'Chapter count': report.details.chapterCount,
+            })) console.log(` ${label}: ${String(value ?? '(not provided)').replace(/\s+/g, ' ').trim()}`);
+
+            console.log('First five chapters:');
+            for (const chapter of report.details.chapters.slice(0, 5)) {
+              console.log(` - ${chapter.title || '(untitled)'} | date=${chapter.date || 'n/a'} | ID=${chapter.chapterId || 'n/a'}`);
+            }
+
+            if (!chapters.length) {
+              report.readerTest = { status: 'SKIPPED_NO_CHAPTERS' };
+              console.log('READER: skipped; detail response contains no chapters.');
+            } else {
+              const parts = String(chapters[0]?.chapterId ?? '').split('/').filter(Boolean);
+              if (parts.length < 2) {
+                report.readerTest = {
+                  status: 'SKIPPED_UNEXPECTED_CHAPTER_ID',
+                  chapterId: chapters[0]?.chapterId ?? null,
+                };
+                console.log(`READER: skipped; unexpected first chapter ID: ${chapters[0]?.chapterId ?? '(empty)'}`);
+              } else {
+                try {
+                  const reader = await getJson(`/reader/${encodeURIComponent(parts[0])}/${encodeURIComponent(parts[1])}`, 180000);
+                  const pages = Array.isArray(reader?.pages) ? reader.pages : [];
+                  const imageUrls = pages.filter(url => typeof url === 'string' && /^https?:\/\//i.test(url));
+                  report.readerTest = {
+                    status: imageUrls.length ? 'PASS' : 'NO_IMAGE_URLS',
+                    chapterId: chapters[0]?.chapterId ?? null,
+                    chapterTitle: chapters[0]?.chapterTitle ?? null,
+                    returnedPageCount: pages.length,
+                    usableImageUrlCount: imageUrls.length,
+                    sampleImageUrls: imageUrls.slice(0, 3),
+                  };
+                  console.log(`READER: ${report.readerTest.status}; page entries=${pages.length}; usable HTTP(S) image URLs=${imageUrls.length}`);
+                  if (!imageUrls.length) report.errors.push('Reader responded, but returned no usable HTTP(S) image URLs.');
+                } catch (error) {
+                  report.readerTest = { status: 'FAIL', chapterId: chapters[0]?.chapterId ?? null, error: error.message };
+                  report.errors.push(`Reader request failed: ${error.message}`);
+                  endpointFailures.push(`${requestedTitle}: reader endpoint failed`);
+                  console.error(report.errors.at(-1));
+                }
+              }
+            }
+            reports.push(report);
+          }
+
+          const output = {
+            testedAt: new Date().toISOString(),
+            apiBase: base,
+            note: 'The scraper currently targets es.novelcool.com. Search results and chapter counts reflect what the source returned during this test.',
+            reports,
+            endpointFailures,
+          };
+          await fs.writeFile('novelcool-title-test.json', JSON.stringify(output, null, 2) + '\n');
+
+          const summary = ['# NovelCool manga title test', '', `Tested at: ${output.testedAt}`, ''];
+          for (const item of reports) {
+            summary.push(`## ${item.requestedTitle}`, '', `- Search endpoint: **${item.searchStatus}**`, `- Match status: **${item.matchStatus}**`);
+            if (item.details) {
+              const d = item.details;
+              summary.push(`- Selected result: ${d.title ?? '(missing title)'} (ID: ${d.id})`, `- Title similarity score: ${d.titleSimilarity}`, `- Author: ${d.author ?? 'not provided'}`, `- Rating: ${d.rating ?? 'not provided'}`, `- Views: ${d.views ?? 'not provided'}`, `- Genres: ${d.genres.join(', ') || 'not provided'}`, `- Chapter count: ${d.chapterCount}`, `- Description: ${String(d.description ?? 'not provided').replace(/\s+/g, ' ').slice(0, 500)}`);
+            }
+            summary.push(`- Reader test: **${item.readerTest?.status ?? 'NOT_RUN'}**`);
+            if (item.readerTest?.returnedPageCount != null) summary.push(`- Page entries: ${item.readerTest.returnedPageCount}; usable image URLs: ${item.readerTest.usableImageUrlCount}`);
+            if (item.errors?.length) summary.push('- Notes/errors:', ...item.errors.map(error => `  - ${error}`));
+            if (item.candidates.length) summary.push('- Top results:', ...item.candidates.slice(0, 5).map(c => `  - ${c.title ?? '(no title)'} (ID: ${c.id ?? 'n/a'}, score: ${c.similarity})`));
+            summary.push('');
+          }
+          summary.push('## How to interpret the results', '', '- **NO_RESULTS** means the search API returned valid JSON but no matches; it does not by itself prove the API is broken.', '- A low similarity score means the selected result is not a verified title match.', '- Chapter count is the number of chapter entries returned by NovelCool, not an independently verified total.', '- The reader test checks extracted URLs, not whether every image can be downloaded or will remain available.', '');
+          await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, summary.join('\n') + '\n');
+
+          console.log('\nFINAL SUMMARY');
+          for (const r of reports) console.log(`- ${r.requestedTitle}: search=${r.searchStatus}; match=${r.matchStatus}; chapters=${r.details?.chapterCount ?? 'n/a'}; reader=${r.readerTest.status}`);
+          if (endpointFailures.length) {
+            console.error('Endpoint failures:', endpointFailures.join('; '));
+            process.exitCode = 1;
+          }
+          NODE
+
+      - name: Show API logs if a step fails
+        if: failure()
+        run: cat /tmp/novelcool-api.log || true
+
+      - name: Upload JSON test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: novelcool-manga-title-test
+          path: novelcool-title-test.json
+          if-no-files-found: warn
+          retention-days: 14
