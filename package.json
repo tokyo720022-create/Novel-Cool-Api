@@ -1,7 +1,7 @@
 {
   "name": "novelcool-api",
   "version": "1.0.0",
-  "description": "api de mangas con web scraping ",
+  "description": "Unofficial Novel Cool API for manga and web novel data using web scraping.",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -11,19 +11,24 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Alexandro521/novelcool-api.git"
+    "url": "git+https://github.com/tokyo720022-create/Novel-Cool-Api.git"
   },
   "keywords": [
+    "novelcool",
+    "novel-cool-api",
     "manga-api",
-    "novelcool-api",
-    "manga-read-api"
+    "novel-api",
+    "web-novel-api",
+    "web-scraping",
+    "nodejs",
+    "express"
   ],
-  "author": "Alexandro mendez",
+  "author": "tokyo720022-create",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/Alexandro521/novelcool-api/issues"
+    "url": "https://github.com/tokyo720022-create/Novel-Cool-Api/issues"
   },
-  "homepage": "https://github.com/Alexandro521/novelcool-api#readme",
+  "homepage": "https://github.com/tokyo720022-create/Novel-Cool-Api#readme",
   "dependencies": {
     "axios": "1.6.8",
     "cheerio": "^1.0.0-rc.12",
