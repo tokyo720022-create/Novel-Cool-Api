@@ -1,5 +1,13 @@
 import {Mangas} from '../models/mangas.js'
 
+// Category names on NovelCool depend on the site language
+// (the model defaults to the English site, see NOVELCOOL_LANGUAGE).
+const LANGUAGE = process.env.NOVELCOOL_LANGUAGE || 'en'
+const CATEGORY_NAMES = {
+    es: { comedy: 'Comedia', action: 'Acción' },
+}
+const categoryName = (key, fallback) => CATEGORY_NAMES[LANGUAGE]?.[key] ?? fallback
+
 
 export class MangaController{
 
@@ -17,23 +25,20 @@ export class MangaController{
         } = req.query
 
         if(genres_includes){
-         genres_includes= genres_includes.split('%G')
+         genres_includes= String(genres_includes).split('%G')
         }
         if(genres_not_includes){
-            genres_not_includes= genres_not_includes.split('%G')
+            genres_not_includes= String(genres_not_includes).split('%G')
         }
-        if(isNaN(year)){
-            year = 0
-        }
-        if(Number.parseInt(year) > 2024 || Number.parseInt(year) < 1943){
-            year = ''
-        }
-        if(isNaN(rate)){
-            rate = 0
-        }
-        if(Number.parseInt(rate) > 5 || Number.parseInt(rate) < 1){
-            rate = ''
-        }
+        const currentYear = new Date().getFullYear()
+        const yearNumber = Number.parseInt(year, 10)
+        year = Number.isInteger(yearNumber) && yearNumber >= 1943 && yearNumber <= currentYear
+            ? yearNumber
+            : ''
+        const rateNumber = Number.parseInt(rate, 10)
+        rate = Number.isInteger(rateNumber) && rateNumber >= 1 && rateNumber <= 5
+            ? rateNumber
+            : ''
         // res.json({
         //     search: query,
         //     author: author,
@@ -84,7 +89,7 @@ export class MangaController{
     }
     static async Comedy(req,res){
         const page = req.query.page ?? 1
-        const result = await Mangas.get_category('Comedia',page)
+        const result = await Mangas.get_category(categoryName('comedy', 'Comedy'),page)
         res.status(200).json(result)
     }
     static async Drama(req,res){
@@ -94,12 +99,12 @@ export class MangaController{
     }
     static async Action(req,res){
         const page = req.query.page ?? 1
-        const result = await Mangas.get_category('Acción',page)
+        const result = await Mangas.get_category(categoryName('action', 'Action'),page)
         res.status(200).json(result)
     }
     static async Webcomic(req,res){
         const page = req.query.page ?? 1
-        const result = await get_category('Webcomic',page)
+        const result = await Mangas.get_category('Webcomic',page)
         res.status(200).json(result)
     }
     static async Category(req,res){

@@ -24,6 +24,12 @@ const mainUrl = (language = process.env.NOVELCOOL_LANGUAGE || 'en') =>
 const PLACEHOLDER_RE =
   /^(?:n\s*\/?\s*a|none|null|undefined|unknown|not\s+available|loading|-)$/i;
 
+function badRequest(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
 function cleanText(value) {
   return String(value ?? '')
     .replace(/\u00a0/g, ' ')
@@ -426,12 +432,12 @@ function extractReaderPageCount($) {
 
 // Fetch manga listings from a NovelCool category.
 async function get_category(categoryUrl) {
-  const URL = new URL(
+  const pageUrl = new URL(
     `category/${categoryUrl}.html`,
     mainUrl(),
   ).href;
 
-  const response = await AxiosGet(URL);
+  const response = await AxiosGet(pageUrl);
   const $ = cheerio.load(response.data);
 
   const categoryTitle = firstText($, [
@@ -521,7 +527,7 @@ export class Mangas {
     const safeId = String(id ?? '').trim();
 
     if (!safeId || /[?#]/.test(safeId)) {
-      throw new Error('A valid NovelCool manga ID is required.');
+      throw badRequest('A valid NovelCool manga ID is required.');
     }
 
     const url = new URL(
@@ -657,7 +663,7 @@ export class Mangas {
         .split('/')
         .some((part) => !part || part === '.' || part === '..')
     ) {
-      throw new Error('A valid NovelCool chapter path is required.');
+      throw badRequest('A valid NovelCool chapter path is required.');
     }
 
     const baseChapterUrl = new URL(

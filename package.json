@@ -2,9 +2,10 @@
   "name": "novelcool-api",
   "version": "1.0.0",
   "description": "api de mangas con web scraping ",
-  "main": "app.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon ./index.js"
   },

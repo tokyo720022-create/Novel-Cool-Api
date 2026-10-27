@@ -15,8 +15,8 @@ export function getMangas($,mangaElement){
         genresList.push(genre)
     });
     const bookRate = index.find('.book-rate .book-rate-num').text();
-    const description = index.find('.book-intro').text().size > 1 ? 
-     index.find('.book-intro').text(): 
+    const description = index.find('.book-intro').text().trim().length > 1 ? 
+     index.find('.book-intro').text().trim(): 
      $(mangaElement).find('.book-pic a .book-summary-content').text();
     const views = index.find('.book-data .book-data-item').find('.book-data-num').text();
     const dataTime = index.find('.book-data').find('.book-data-time').text();
