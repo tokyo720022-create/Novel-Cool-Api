@@ -12,14 +12,6 @@ on:
         description: "Optional exact manga ID to inspect (the part before .html in the site URL)"
         required: false
         type: string
-      language:
-        description: "NovelCool site language"
-        required: true
-        type: choice
-        default: en
-        options:
-          - en
-          - es
 
 permissions:
   contents: read
@@ -45,7 +37,6 @@ jobs:
         env:
           DIAG_QUERIES: ${{ inputs.queries }}
           DIAG_ID: ${{ inputs.manga_id }}
-          NOVELCOOL_LANGUAGE: ${{ inputs.language }}
         run: node scripts/diagnose.js
 
       - name: Add report to job summary
