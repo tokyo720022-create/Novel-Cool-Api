@@ -1,0 +1,70 @@
+name: Diagnose NovelCool Scraping
+
+on:
+  workflow_dispatch:
+    inputs:
+      queries:
+        description: "Titles to test, separated by | (a control title is added automatically)"
+        required: true
+        type: string
+        default: "I massage my little sister every night|A narrow-eyed gentle big-breasted mama"
+      manga_id:
+        description: "Optional exact manga ID to inspect (the part before .html in the site URL)"
+        required: false
+        type: string
+      language:
+        description: "NovelCool site language"
+        required: true
+        type: choice
+        default: en
+        options:
+          - en
+          - es
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run diagnostics
+        env:
+          DIAG_QUERIES: ${{ inputs.queries }}
+          DIAG_ID: ${{ inputs.manga_id }}
+          NOVELCOOL_LANGUAGE: ${{ inputs.language }}
+        run: node scripts/diagnose.js
+
+      - name: Add report to job summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f diagnostics/report.txt ]; then
+            {
+              echo '```text'
+              cat diagnostics/report.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload raw HTML and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: novelcool-diagnostics
+          path: diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
