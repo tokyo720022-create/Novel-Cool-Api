@@ -88,6 +88,12 @@ const READER_GROUPS = {
     '.mangaread-pagenav .sl-page option',
   ],
   title: ['.mangaread-title', '.chapter-title', 'h1'],
+  'novel text': [
+    '.chapter-title',
+    '.chapter-title ~ p',
+    '.chapter-reading-pagination a[href]',
+    '#chapter-book-url',
+  ],
 }
 
 // ---------- helpers ----------
@@ -216,22 +222,21 @@ function listCards($, max = 20) {
 // Prefer a Manga result: the API's reader only supports image chapters.
 const pickResult = (items) => items.find((it) => it.id && /manga/i.test(it.type)) || items.find((it) => it.id)
 
-const searchUrl = (name) =>
-  new URL(
-    'search/?' +
-      new URLSearchParams({
-        name_sel: 'contain',
-        name,
-        author_sel: 'contain',
-        author: '',
-        category_id: ',',
-        out_category_id: ',',
-        publish_year: '',
-        completed_series: '',
-        rate_star: '',
-      }).toString(),
-    BASE,
-  ).href
+const searchUrl = (name, page = 1) => {
+  const params = new URLSearchParams({
+    name_sel: 'contain',
+    name,
+    author_sel: 'contain',
+    author: '',
+    category_id: ',',
+    out_category_id: ',',
+    publish_year: '',
+    completed_series: '',
+    rate_star: '',
+  })
+  if (page > 1) params.set('page', `${page}.html`)
+  return new URL('search/?' + params.toString(), BASE).href
+}
 
 // ---------- steps ----------
 async function runSearch(query) {
@@ -244,6 +249,7 @@ async function runSearch(query) {
 
   const counts = []
   let firstId = ''
+  let novelId = ''
   for (const [i, v] of variants.entries()) {
     await sleep(800)
     const page = await fetchPage(`search-${slug(query)}-${i}`, searchUrl(v))
@@ -256,10 +262,48 @@ async function runSearch(query) {
     log(`  variant "${clip(v, 40)}": ${total} card(s); text in HTML: ${present ? 'yes' : 'no'}`)
     items.slice(0, 6).forEach((it) => log(`    - [${it.type || '?'}] ${it.title} (${it.id || 'no id'})`))
     counts.push(String(total))
-    if (!firstId) firstId = pickResult(items)?.id || ""
+    if (!firstId) firstId = pickResult(items)?.id || ''
+    if (!novelId) novelId = items.find((it) => it.id && /novel/i.test(it.type))?.id || ''
   }
   summary.search.push(`"${clip(query, 38)}" -> cards per variant: ${counts.join(' / ')}`)
-  return firstId
+
+  // Does "&page=2.html" really give page 2? (used by /search?page=2)
+  await sleep(800)
+  const second = await fetchPage(`search-${slug(query)}-page2`, searchUrl(query, 2))
+  if (second) {
+    const cards = listCards(second.$)
+    const pager = clip(second.$('.page-navone .page-nav-center-num').first().text(), 12) || 'none'
+    log(`  page 2: ${cards.total} card(s); pager shows "${pager}"`)
+    cards.items.slice(0, 3).forEach((it) => log(`    - [${it.type || '?'}] ${it.title} (${it.id || 'no id'})`))
+    summary.search.push(`"${clip(query, 30)}" page 2 -> ${cards.total} cards, pager "${pager}"`)
+  }
+  return { id: firstId, novelId }
+}
+
+async function runListings() {
+  log('')
+  log('=== LISTING PAGES (used by /lasted and ?page=N) ===')
+  for (const path of ['latest', 'updated', 'Comedy_1', 'Comedy_2', 'completed_2']) {
+    await sleep(800)
+    const page = await fetchPage(`listing-${slug(path)}`, new URL(`category/${path}.html`, BASE).href)
+    if (!page) continue
+    const cards = listCards(page.$)
+    const pager = clip(page.$('.page-navone .page-nav-center-num').first().text(), 12) || 'none'
+    log(`  ${path}: HTTP ${page.status}, ${cards.total} card(s), pager "${pager}"`)
+    summary.search.push(`listing ${path}: HTTP ${page.status}, ${cards.total} cards`)
+  }
+}
+
+// Fetch one Novel chapter and check the selectors the text reader relies on.
+async function runNovelSample(id) {
+  const detail = await runDetail('novel sample', id)
+  const href = detail?.chapterLinks?.[0]
+  if (!href) return
+  await sleep(800)
+  log('')
+  log('=== NOVEL TEXT READER SAMPLE ===')
+  const page = await fetchPage('novel-reader-sample', new URL(href, BASE).href)
+  if (page) probe(page.$, { 'novel text': READER_GROUPS['novel text'] })
 }
 
 async function runDetail(label, id) {
@@ -362,8 +406,10 @@ async function main() {
   if (home) probe(home.$, { sections: ['.index-book-list', '.site-content .category-book-list .book-item'] })
 
   let readerHref = ''
+  let novelSampleId = ''
   for (const query of queries) {
-    const id = await runSearch(query)
+    const { id, novelId } = await runSearch(query)
+    if (!novelSampleId && novelId) novelSampleId = novelId
     if (!id) continue
     const detail = await runDetail(query, id)
     if (!readerHref && detail?.chapterLinks?.[0]) readerHref = detail.chapterLinks[0]
@@ -376,6 +422,8 @@ async function main() {
   }
 
   await runGenres()
+  await runListings()
+  if (novelSampleId) await runNovelSample(novelSampleId)
 
   if (readerHref) await runReader('first chapter found', readerHref)
   else {

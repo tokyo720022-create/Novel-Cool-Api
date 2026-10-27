@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { MangaController } from "../controller/mangas.js";
 import { asyncHandler } from "../middleware/errorHandler.js";
+import { readerLimiter } from "../middleware/rateLimit.js";
 
 export const mangasRouter = Router()
 
@@ -17,7 +18,9 @@ mangasRouter.get('/category/:category', asyncHandler(MangaController.Category))
 mangasRouter.get('/search', asyncHandler(MangaController.search))
 mangasRouter.get('/view/:id', asyncHandler(MangaController.info))
 mangasRouter.get('/info/genres', asyncHandler(MangaController.genres))
-mangasRouter.get('/reader/:ch/:id', asyncHandler(MangaController.reader))
+// Readers make many upstream requests, so they have their own (lower) rate limit.
+mangasRouter.get('/reader/novel/:ch/:id', readerLimiter, asyncHandler(MangaController.novelReader))
+mangasRouter.get('/reader/:ch/:id', readerLimiter, asyncHandler(MangaController.reader))
 
 
 

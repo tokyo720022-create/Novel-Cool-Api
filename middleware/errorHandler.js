@@ -29,8 +29,11 @@ export function errorHandler(err, req, res, next) {
       status = 502
       message = 'Could not reach NovelCool.'
     }
-  } else if (Number.isInteger(err?.status) && err.status >= 400 && err.status < 500) {
-    // Errors we raise ourselves (e.g. invalid ID) are safe to show.
+  } else if (
+    Number.isInteger(err?.status) &&
+    ((err.status >= 400 && err.status < 500) || err.status === 503)
+  ) {
+    // Errors we raise ourselves (bad input, 429 rate limit, 503 busy) are safe to show.
     status = err.status
     message = err.message
   }

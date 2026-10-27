@@ -2,7 +2,7 @@
 
 [![NovelCool API Health Check](https://github.com/tokyo720022-create/novelcool-api/actions/workflows/novelcool-api-health.yml/badge.svg)](https://github.com/tokyo720022-create/novelcool-api/actions/workflows/novelcool-api-health.yml)
 
-An **unofficial REST API** that scrapes manga listings, metadata, genres, and chapter pages from NovelCool. It uses Node.js, Express, Axios, and Cheerio.
+An **unofficial REST API** that scrapes manga and novel listings, metadata, genres, and chapters (manga page images and novel text) from NovelCool. It uses Node.js, Express, Axios, and Cheerio.
 
 > **Disclaimer:** This is a community project and is not affiliated with or endorsed by NovelCool. It relies on NovelCool's website structure, so source-site changes may cause endpoints to stop working. Use the service responsibly and respect the source site's terms.
 
@@ -12,7 +12,9 @@ An **unofficial REST API** that scrapes manga listings, metadata, genres, and ch
 - Search manga by title or author
 - Browse categories and genres
 - Retrieve manga details and chapter lists
-- Retrieve the page-image URLs for a chapter
+- Retrieve the page-image URLs for a manga chapter, or the **text of a novel chapter**
+- Page through results (`?page=`) and filter by `?type=manga|novel`
+- Built-in response cache and rate limiting
 - Run automated API smoke checks through GitHub Actions
 
 ## Requirements
@@ -69,7 +71,8 @@ All endpoints use HTTP `GET`. Replace the local base URL with your deployed API 
 | `/search` | Search and filter manga |
 | `/view/:id` | Manga details and chapter list |
 | `/info/genres` | Available genres |
-| `/reader/:ch/:id` | Chapter page-image URLs (manga chapters only; novel chapters are text and are not supported) |
+| `/reader/:ch/:id` | Manga chapter: page-image URLs |
+| `/reader/novel/:ch/:id` | Novel chapter: text, paragraphs and previous/next links |
 | `/health` | Server health check (not under `/api/v1`) |
 
 Prefix each path with `/api/v1`. For example:
@@ -78,6 +81,20 @@ Prefix each path with `/api/v1`. For example:
 GET http://localhost:1234/api/v1/lasted
 GET http://localhost:1234/api/v1/search?query=One%20Piece
 GET http://localhost:1234/api/v1/view/MANGA_ID
+```
+
+### Paging and type filter
+
+Listing routes and `/search` accept:
+
+| Parameter | Description |
+| --- | --- |
+| `page` | Page number, `1`–`1000` (default `1`). The response `pagination` has `currentPage` and `lastPage`. `/lasted` and `/index` are not paged. |
+| `type` | `manga` or `novel`. Keeps only that kind of result on the fetched page, so a page may contain fewer items than usual. The response gets `filter: { type, matched, scanned }`. |
+
+```http
+GET /api/v1/comedy?page=2&type=manga
+GET /api/v1/search?query=One%20Piece&page=2&type=novel
 ```
 
 ### Search parameters
@@ -116,13 +133,61 @@ The detail response includes `bookId`, `title`, `bookType`, `status` (`Ongoing` 
 
 ### Read a chapter
 
-The reader route takes the chapter path segment and chapter ID, in that order:
+Each entry in a detail response's `chaptersList` has a `chapterId` such as `Some-Chapter-Title/4752776`. Split it at the `/` into the two route parameters.
+
+**Novel chapter (text):**
 
 ```http
-GET http://localhost:1234/api/v1/reader/CHAPTER_SLUG/CHAPTER_ID
+GET /api/v1/reader/novel/Some-Chapter-Title/4752776
 ```
 
-For example, the route format used by the source scraper is `/reader/Cap-tulo-154/11858129`. The response contains chapter information and a list of page-image URLs.
+Returns `title`, `paragraphs` (array), `text` (paragraphs joined with blank lines), `wordCount`, `bookId`, `bookUrl`, `previous` and `next` (each `{ chapterId, url }`, or `null`), and `sourceUrl`. A manga chapter sent to this route gets a `422` explaining that it has no text.
+
+**Manga chapter (images):**
+
+```http
+GET /api/v1/reader/CHAPTER_SLUG/CHAPTER_ID
+```
+
+Returns chapter information and a list of page-image URLs.
+
+## Caching
+
+Responses are cached in memory (the cache keeps the unfiltered result, so `?type=` changes never cost an extra upstream request). Identical requests that arrive while one is loading share a single NovelCool request, and failures are never cached. Every response has an `X-Cache` header: `HIT`, `MISS`, `COALESCED` or `BYPASS`.
+
+| Content | Default time-to-live |
+| --- | --- |
+| Index, latest, categories | 5 minutes |
+| Search | 5 minutes |
+| Details (`/view/:id`) | 10 minutes |
+| Chapters (`/reader/...`) | 1 hour |
+| Genres | 24 hours |
+
+On serverless hosts such as Vercel each warm instance has its own cache, and it is lost when the instance goes to sleep.
+
+## Rate limiting
+
+Each client IP gets **60 requests per minute** on `/api/v1`, and **10 per minute** on the reader routes (they make many upstream requests). Responses carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`. Going over returns `429` with a `Retry-After` header. Separately, the server sends at most **4 requests at a time** to NovelCool (extra requests wait in a queue; if the queue is full you get `503`).
+
+`/health` is not rate limited and reports cache and upstream-queue statistics.
+
+Behind a reverse proxy, set `TRUST_PROXY=1` so the real client IP is used (this is automatic on Vercel). Do not set it when the API is exposed directly, because clients could fake their IP.
+
+### Settings (environment variables)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `1234` | Server port |
+| `TRUST_PROXY` | off | Number of proxy hops to trust (see above) |
+| `RATE_LIMIT_MAX` | `60` | Requests per window per client |
+| `RATE_LIMIT_READER_MAX` | `10` | Reader requests per window per client |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window length |
+| `RATE_LIMIT_DISABLED` | off | `1` turns rate limiting off |
+| `UPSTREAM_CONCURRENCY` | `4` | Simultaneous requests to NovelCool |
+| `UPSTREAM_MAX_QUEUE` | `100` | Waiting requests before `503` |
+| `CACHE_DISABLED` | off | `1` turns the cache off |
+| `CACHE_MAX_ENTRIES` | `500` | Cache size (least recently used entries are dropped) |
+| `CACHE_TTL_LIST`, `CACHE_TTL_SEARCH`, `CACHE_TTL_DETAIL`, `CACHE_TTL_READER`, `CACHE_TTL_GENRES` | see above | Time-to-live in seconds (`0` = don't cache) |
 
 ## Errors
 
@@ -130,9 +195,12 @@ Failures return JSON with an HTTP status instead of crashing the server:
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Invalid manga ID or chapter path |
+| `400` | Invalid manga ID, chapter path, `page` or `type` |
 | `404` | Not found on NovelCool |
+| `422` | The chapter has no text (a manga chapter sent to the novel reader) |
+| `429` | Rate limit exceeded; see `Retry-After` |
 | `502` | NovelCool could not be reached or returned an error |
+| `503` | Too many requests are waiting on NovelCool; retry shortly |
 | `504` | NovelCool took too long to respond |
 
 ```json
@@ -168,5 +236,7 @@ These checks validate the API running in the GitHub Actions runner; they do not,
 - This is a website scraper, not an official NovelCool API.
 - Site HTML, routes, or anti-bot measures can change and break scraping.
 - Some routes may require maintenance if the upstream site's category structure changes.
-- Search results mix manga and novels; filter on the `type` field.
+- Search results mix manga and novels; use `?type=` or filter on the `type` field.
+- Manga chapter images (`/reader/:ch/:id`) have not been verified against the live English site; run the diagnostic workflow to check.
+- Cache and rate-limit counters are per server process, not shared between instances.
 - The package currently has no dedicated `npm test` suite; GitHub Actions performs smoke tests instead.

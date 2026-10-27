@@ -3,6 +3,7 @@ import axios from 'axios';
 import { getCategoryList, filterCategoryList } from './modules/categoryList.js';
 import { pagination } from './modules/pagination.js';
 import { getMangas } from './modules/getMangas.js';
+import { upstream } from './modules/limiter.js';
 
 const axiosHead = {
   headers: {
@@ -19,6 +20,9 @@ const axiosHead = {
 // The scraper targets the English NovelCool site only.
 const BASE_URL = 'https://en.novelcool.com/';
 const mainUrl = () => BASE_URL;
+
+// Chapter links on the site point at www.novelcool.com.
+const CHAPTER_BASE_URL = 'https://www.novelcool.com/';
 
 // "Ongoing" / "Completed" appear in the same list as genres on NovelCool.
 const STATUS_LABELS = new Set(['ongoing', 'completed']);
@@ -78,8 +82,9 @@ function deduplicateSentenceText(value) {
   return cleanText(unique.join(' '));
 }
 
+// Every request to NovelCool goes through a small concurrency limit.
 async function AxiosGet(url) {
-  return axios.get(url, axiosHead);
+  return upstream(() => axios.get(url, axiosHead));
 }
 
 // `root` is either the Cheerio `$` function (search the whole page) or a
@@ -436,6 +441,82 @@ function extractReaderPageCount($) {
 }
 
 // Fetch manga listings from a NovelCool category.
+// Parses a novel chapter page (text, not images).
+// Page layout: <h2.chapter-title> followed by one <p> per paragraph inside the
+// same box, plus .chapter-start-mark / .chapter-end-mark marker paragraphs.
+function parseNovelChapter($, url, fallbackChapterId) {
+  const titleElement = $('.chapter-title').first();
+  const title = cleanText(titleElement.text());
+
+  const paragraphs = [];
+  const collect = (box) => {
+    box.children('p').each((_, element) => {
+      const paragraph = $(element);
+
+      if (
+        paragraph.hasClass('chapter-start-mark') ||
+        paragraph.hasClass('chapter-end-mark')
+      ) {
+        return;
+      }
+
+      const text = cleanText(paragraph.text());
+      if (text) paragraphs.push(text);
+    });
+  };
+
+  collect(titleElement.parent());
+  if (!paragraphs.length) collect($('.site-content .overflow-hidden').first());
+
+  if (!paragraphs.length) {
+    const error = new Error(
+      'No readable text found in this chapter. For manga chapters use /reader/:ch/:id instead.',
+    );
+    error.status = 422;
+    throw error;
+  }
+
+  let previous = null;
+  let next = null;
+
+  $('.chapter-reading-pagination')
+    .first()
+    .find('a[href]')
+    .each((_, element) => {
+      const link = $(element);
+      const label = cleanText(link.text()).toLowerCase();
+      const href = absoluteUrl(link.attr('href'), CHAPTER_BASE_URL);
+      const target = href
+        ? { chapterId: chapterIdFromHref(href), url: href }
+        : null;
+
+      if (label.includes('prev')) previous = target;
+      else if (label.includes('next')) next = target;
+    });
+
+  const bookUrl = absoluteUrl(
+    $('#chapter-book-url').first().text(),
+    CHAPTER_BASE_URL,
+  );
+  const bookId = (bookUrl.match(/\/(?:novel|manga)\/([^/]+)\.html/i) || [])[1] || '';
+  const text = paragraphs.join('\n\n');
+
+  return {
+    chapterId:
+      cleanText($('input[name="chapter_id"]').first().attr('value')) ||
+      fallbackChapterId,
+    title,
+    bookId,
+    bookUrl,
+    previous,
+    next,
+    wordCount: text.split(/\s+/).filter(Boolean).length,
+    paragraphs,
+    text,
+    sourceUrl: url,
+  };
+}
+
 async function get_category(categoryUrl) {
   const pageUrl = new URL(
     `category/${categoryUrl}.html`,
@@ -723,6 +804,35 @@ export class Mangas {
     };
   }
 
+  // Novel chapters are plain text. `slug` and `id` are the two parts of the
+  // chapterId returned by /view/:id (for example "Some-Chapter-Title" and "4752776").
+  static async chapter_read_text(slug, id) {
+    const chapterSlug = String(slug ?? '').trim();
+    const chapterNumber = String(id ?? '').trim();
+
+    if (
+      !chapterSlug ||
+      /[\\/]/.test(chapterSlug) ||
+      chapterSlug === '.' ||
+      chapterSlug === '..' ||
+      !/^\d+$/.test(chapterNumber)
+    ) {
+      throw badRequest(
+        'A valid chapter slug and numeric chapter ID are required.',
+      );
+    }
+
+    const url = new URL(
+      `chapter/${encodeURIComponent(chapterSlug)}/${chapterNumber}/`,
+      CHAPTER_BASE_URL,
+    ).href;
+
+    const response = await AxiosGet(url);
+    const $ = cheerio.load(response.data);
+
+    return parseNovelChapter($, url, `${chapterSlug}/${chapterNumber}`);
+  }
+
   static async search(
     searchText,
     Author = '',
@@ -733,6 +843,7 @@ export class Mangas {
     publishYear = '',
     complete_Series = '',
     rate_star = '',
+    page = 1,
   ) {
     const asCommaSeparated = (value) =>
       Array.isArray(value)
@@ -750,6 +861,9 @@ export class Mangas {
       completed_series: String(complete_Series ?? ''),
       rate_star: String(rate_star ?? ''),
     });
+
+    // NovelCool's own pager links use "&page=2.html".
+    if (page > 1) searchParams.set('page', `${page}.html`);
 
     const searchUrl = new URL(
       `search/?${searchParams.toString()}`,
@@ -783,9 +897,11 @@ export class Mangas {
         publishYear: publishYear ?? 'none',
         complete_Series: complete_Series ?? 'none',
         rate_star: rate_star ?? 'none',
+        page,
       },
       body: {
         result: mangaList,
+        pagination: pagination($),
         genres,
       },
     };
