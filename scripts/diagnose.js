@@ -5,15 +5,13 @@
 //
 // Env: DIAG_QUERIES  titles separated by "|"   (a control title is always added)
 //      DIAG_ID       optional exact manga ID to inspect
-//      NOVELCOOL_LANGUAGE  site language, default "en"
 
 import axios from 'axios'
 import * as cheerio from 'cheerio'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-const LANGUAGE = process.env.NOVELCOOL_LANGUAGE || 'en'
-const BASE = `https://${LANGUAGE}.novelcool.com/`
+const BASE = 'https://en.novelcool.com/'
 const OUT = path.resolve('diagnostics')
 const CONTROL = 'One Piece' // well-known title: tells "scraper broken" from "this title is special"
 
@@ -197,7 +195,7 @@ function maxCount($, selectors) {
   return best
 }
 
-function listCards($, max = 5) {
+function listCards($, max = 20) {
   const cards = $('.site-content .category-book-list .book-item')
   const items = []
   cards.each((i, el) => {
@@ -205,11 +203,18 @@ function listCards($, max = 5) {
     const card = $(el)
     const href = card.find('.book-pic a').attr('href') || ''
     const id = (href.match(/\/([^/]+)\.html$/) || [])[1] || ''
-    items.push({ id, title: clip(card.find('.book-name').text(), 50) })
+    items.push({
+      id,
+      type: clip(card.find('.book-pic .book-type').first().text(), 10),
+      title: clip(card.find('.book-info .book-name').first().text(), 50),
+    })
     return undefined
   })
   return { total: cards.length, items }
 }
+
+// Prefer a Manga result: the API's reader only supports image chapters.
+const pickResult = (items) => items.find((it) => it.id && /manga/i.test(it.type)) || items.find((it) => it.id)
 
 const searchUrl = (name) =>
   new URL(
@@ -249,9 +254,9 @@ async function runSearch(query) {
     const { total, items } = listCards(page.$)
     const present = page.html.toLowerCase().includes(v.toLowerCase())
     log(`  variant "${clip(v, 40)}": ${total} card(s); text in HTML: ${present ? 'yes' : 'no'}`)
-    items.forEach((it) => log(`    - ${it.title} [${it.id || 'no id'}]`))
+    items.slice(0, 6).forEach((it) => log(`    - [${it.type || '?'}] ${it.title} (${it.id || 'no id'})`))
     counts.push(String(total))
-    if (!firstId && items[0]?.id) firstId = items[0].id
+    if (!firstId) firstId = pickResult(items)?.id || ""
   }
   summary.search.push(`"${clip(query, 38)}" -> cards per variant: ${counts.join(' / ')}`)
   return firstId
@@ -271,9 +276,12 @@ async function runDetail(label, id) {
   probe($, DETAIL_GROUPS)
 
   const chapterLinks = []
-  $('a[href*="/chapter/"]').each((i, el) => {
-    if (i >= 3) return false
-    chapterLinks.push($(el).attr('href'))
+  $('.chp-item a[href], a[href*="/chapter/"]').each((_, el) => {
+    const href = $(el).attr('href') || ''
+    // skip the empty "Start Reading" placeholder ("/chapter//.html")
+    if (/\/chapter\/[^/]+\/?/.test(href) && !/\/chapter\/\/?\.html/.test(href) && chapterLinks.length < 3) {
+      chapterLinks.push(href)
+    }
     return undefined
   })
 
@@ -288,12 +296,14 @@ async function runDetail(label, id) {
   summary.detail.push(
     [
       `${clip(label, 24)} [${clip(id, 30)}]`,
+      `type=${firstFilled($, ['.book-type']) || '?'}`,
       `title=${firstFilled($, DETAIL_GROUPS.title) ? 'ok' : 'MISSING'}`,
       `author=${firstFilled($, DETAIL_GROUPS.author) ? 'ok' : 'MISSING'}`,
       `desc=${firstFilled($, DETAIL_GROUPS.description) ? 'ok' : 'MISSING'}`,
       `genres=${maxCount($, DETAIL_GROUPS.genres)}`,
       `stats=${maxCount($, DETAIL_GROUPS.stats)}`,
-      `chapters=${maxCount($, DETAIL_GROUPS.chapters)}`,
+      `chapters=${maxCount($, ['.chapter-item-list .chp-item'])}`,
+      `real-links=${chapterLinks.length ? 'yes' : 'none'}`,
     ].join('  '),
   )
   return { chapterLinks }
@@ -307,6 +317,28 @@ async function runReader(label, href) {
   const page = await fetchPage(`reader-${slug(label)}`, url)
   if (!page) return
   probe(page.$, READER_GROUPS)
+
+  // Also try the URL the API itself builds for /reader/:ch/:id
+  // (models/mangas.js -> chapter/<slug>/<id>-10-1.html).
+  const rest = (url.split(/\/chapter\//i)[1] || '').replace(/\/+$/, '').replace(/\.html?$/i, '')
+  if (rest) {
+    log('')
+    log('  -- API-style URL (same pattern as /reader/:ch/:id) --')
+    await sleep(800)
+    const apiPage = await fetchPage(`reader-api-url-${slug(label)}`, new URL(`chapter/${rest}-10-1.html`, BASE).href)
+    if (apiPage) probe(apiPage.$, { images: READER_GROUPS.images, 'page selector': READER_GROUPS['page selector'] })
+  }
+}
+
+async function runGenres() {
+  log('')
+  log('=== GENRES PAGE (used by /info/genres) ===')
+  const page = await fetchPage('genres', new URL('category/1947.html', BASE).href)
+  if (!page) return
+  probe(page.$, {
+    genres: ['.category-group .category-list > a', '.category-list > .category-id-item'],
+    pagination: ['.page-navone .select', '.page-navone .page-nav-center-num'],
+  })
 }
 
 // ---------- main ----------
@@ -342,6 +374,8 @@ async function main() {
     const detail = await runDetail('manual-id', manualId)
     if (!readerHref && detail?.chapterLinks?.[0]) readerHref = detail.chapterLinks[0]
   }
+
+  await runGenres()
 
   if (readerHref) await runReader('first chapter found', readerHref)
   else {

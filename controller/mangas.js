@@ -1,13 +1,5 @@
 import {Mangas} from '../models/mangas.js'
 
-// Category names on NovelCool depend on the site language
-// (the model defaults to the English site, see NOVELCOOL_LANGUAGE).
-const LANGUAGE = process.env.NOVELCOOL_LANGUAGE || 'en'
-const CATEGORY_NAMES = {
-    es: { comedy: 'Comedia', action: 'Acción' },
-}
-const categoryName = (key, fallback) => CATEGORY_NAMES[LANGUAGE]?.[key] ?? fallback
-
 
 export class MangaController{
 
@@ -89,7 +81,7 @@ export class MangaController{
     }
     static async Comedy(req,res){
         const page = req.query.page ?? 1
-        const result = await Mangas.get_category(categoryName('comedy', 'Comedy'),page)
+        const result = await Mangas.get_category('Comedy',page)
         res.status(200).json(result)
     }
     static async Drama(req,res){
@@ -99,7 +91,7 @@ export class MangaController{
     }
     static async Action(req,res){
         const page = req.query.page ?? 1
-        const result = await Mangas.get_category(categoryName('action', 'Action'),page)
+        const result = await Mangas.get_category('Action',page)
         res.status(200).json(result)
     }
     static async Webcomic(req,res){

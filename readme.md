@@ -50,7 +50,7 @@ Local base URL:
 http://localhost:1234/api/v1
 ```
 
-The scraper currently requests the Spanish-language NovelCool website.
+The scraper reads the English NovelCool website (`en.novelcool.com`). NovelCool lists both manga and novels, so every result has a `type` field (`Manga` or `Novel`).
 
 ## API Endpoints
 
@@ -69,7 +69,8 @@ All endpoints use HTTP `GET`. Replace the local base URL with your deployed API 
 | `/search` | Search and filter manga |
 | `/view/:id` | Manga details and chapter list |
 | `/info/genres` | Available genres |
-| `/reader/:ch/:id` | Chapter page-image URLs |
+| `/reader/:ch/:id` | Chapter page-image URLs (manga chapters only; novel chapters are text and are not supported) |
+| `/health` | Server health check (not under `/api/v1`) |
 
 Prefix each path with `/api/v1`. For example:
 
@@ -111,7 +112,7 @@ Use an ID returned by a manga listing:
 GET http://localhost:1234/api/v1/view/MANGA_ID
 ```
 
-The detail response includes fields such as title, image, author, description, genres, and `chaptersList`.
+The detail response includes `bookId`, `title`, `bookType`, `status` (`Ongoing` / `Completed`), `author`, `rate`, `votes`, `description`, `genres`, `chapterCount`, `chaptersList` (each with `chapterId`, `chapterTitle`, `chapterDate`, `url`) and `sourceUrl`. The website does not publish view or follower counts, so those are not returned.
 
 ### Read a chapter
 
@@ -122,6 +123,21 @@ GET http://localhost:1234/api/v1/reader/CHAPTER_SLUG/CHAPTER_ID
 ```
 
 For example, the route format used by the source scraper is `/reader/Cap-tulo-154/11858129`. The response contains chapter information and a list of page-image URLs.
+
+## Errors
+
+Failures return JSON with an HTTP status instead of crashing the server:
+
+| Status | Meaning |
+| --- | --- |
+| `400` | Invalid manga ID or chapter path |
+| `404` | Not found on NovelCool |
+| `502` | NovelCool could not be reached or returned an error |
+| `504` | NovelCool took too long to respond |
+
+```json
+{ "error": "Could not reach NovelCool.", "status": 502 }
+```
 
 ## Response for unknown routes
 
@@ -152,4 +168,5 @@ These checks validate the API running in the GitHub Actions runner; they do not,
 - This is a website scraper, not an official NovelCool API.
 - Site HTML, routes, or anti-bot measures can change and break scraping.
 - Some routes may require maintenance if the upstream site's category structure changes.
+- Search results mix manga and novels; filter on the `type` field.
 - The package currently has no dedicated `npm test` suite; GitHub Actions performs smoke tests instead.

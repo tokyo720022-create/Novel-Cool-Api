@@ -16,10 +16,12 @@ const axiosHead = {
   maxRedirects: 5,
 };
 
-// Defaults to the English site.
-// Optionally set NOVELCOOL_LANGUAGE to another supported locale.
-const mainUrl = (language = process.env.NOVELCOOL_LANGUAGE || 'en') =>
-  `https://${language}.novelcool.com/`;
+// The scraper targets the English NovelCool site only.
+const BASE_URL = 'https://en.novelcool.com/';
+const mainUrl = () => BASE_URL;
+
+// "Ongoing" / "Completed" appear in the same list as genres on NovelCool.
+const STATUS_LABELS = new Set(['ongoing', 'completed']);
 
 const PLACEHOLDER_RE =
   /^(?:n\s*\/?\s*a|none|null|undefined|unknown|not\s+available|loading|-)$/i;
@@ -80,24 +82,27 @@ async function AxiosGet(url) {
   return axios.get(url, axiosHead);
 }
 
-function firstText($, selectors, { minLength = 1 } = {}) {
+// `root` is either the Cheerio `$` function (search the whole page) or a
+// Cheerio node (search inside that node only).
+function firstText(root, selectors, { minLength = 1 } = {}) {
+  const find =
+    typeof root === 'function'
+      ? (selector) => root(selector)
+      : (selector) => root.find(selector);
+
   for (const selector of selectors) {
-    let value = '';
+    const found = find(selector);
 
-    $(selector).each((_, element) => {
-      if (value) return;
-
-      const candidate = cleanText($(element).text());
+    for (let index = 0; index < found.length; index += 1) {
+      const candidate = cleanText(found.eq(index).text());
 
       if (
         !isPlaceholder(candidate) &&
         candidate.length >= minLength
       ) {
-        value = candidate;
+        return candidate;
       }
-    });
-
-    if (value) return value;
+    }
   }
 
   return '';
@@ -204,14 +209,18 @@ function getDescription($) {
   return candidates[0] ?? '';
 }
 
+function getStatus($) {
+  return firstText($, [
+    '.bk-cates .bookinfo-category-list > .bk-cate-type1',
+    '.bk-status .bk-status-item',
+  ]);
+}
+
 function getGenres($) {
   const selectors = [
-    '.for-pc .bk-cates .bookinfo-category-list > .bk-cate-item',
-    '.bookinfo-category-list .bk-cate-item',
+    '.bk-cates .bookinfo-category-list > .bk-cate-item:not(.bk-cate-type1)',
     '.bookinfo-category-list a',
-    '.bk-cates a',
     '.book-tags .book-tag',
-    '.book-data-info .book-tags .book-tag',
   ];
 
   for (const selector of selectors) {
@@ -225,6 +234,7 @@ function getGenres($) {
       if (
         text &&
         !isPlaceholder(text) &&
+        !STATUS_LABELS.has(text.toLowerCase()) &&
         !found.includes(text)
       ) {
         found.push(text);
@@ -341,11 +351,6 @@ function extractChapterEntries($) {
       entries.push({
         chapterId,
         chapterTitle,
-        chapterViews: firstText(node, [
-          '.chapter-item-views span',
-          '.chapter-views',
-          '.chapter-views span',
-        ]),
         chapterDate: firstText(node, [
           '.chapter-item-time',
           '.chapter-date',
@@ -586,47 +591,23 @@ export class Mangas {
       ]) ||
       cleanText($('meta[name="author"]').attr('content'));
 
-    const statValues = [];
+    // The website HTML has no views/followers counters (only the mobile app
+    // shows them), so they are not returned.
+    const rate = firstText($, [
+      '.bookinfo-rate-val',
+      '.book-rate-num',
+      '[itemprop="ratingValue"]',
+    ]);
 
-    $(
-      '.for-pc .bk-data .bk-data-val, ' +
-        '.bk-data .bk-data-val, ' +
-        '.book-data-item .book-data-num',
-    ).each((_, element) => {
-      const value = cleanText($(element).text());
+    // NovelCool prints the vote count as "( 12 Votes )".
+    const votesMatch = firstText($, ['.bookinfo-vote-num']).match(/-?\d+/);
+    const votes = votesMatch ? Number.parseInt(votesMatch[0], 10) : null;
 
-      if (value && !isPlaceholder(value)) {
-        statValues.push(value);
-      }
-    });
+    const status = getStatus($);
 
-    const followers =
-      firstText($, [
-        '.for-pc .bk-data > :first-child .bk-data-val',
-        '.book-followers',
-        '[data-stat="followers"]',
-      ]) ||
-      statValues[0] ||
-      '';
-
-    const rate =
-      firstText($, [
-        '.for-pc .bk-data > :nth-child(2) .bk-data-val',
-        '.book-rate-num',
-        '.book-rating',
-        '[itemprop="ratingValue"]',
-      ]) ||
-      statValues[1] ||
-      '';
-
-    const views =
-      firstText($, [
-        '.for-pc .bk-data > :last-child .bk-data-val',
-        '.book-views',
-        '[data-stat="views"]',
-      ]) ||
-      statValues[2] ||
-      '';
+    const bookId = cleanText(
+      $('.book-follow-trigger').first().attr('book_id'),
+    );
 
     const description = getDescription($);
     const genres = getGenres($);
@@ -635,12 +616,13 @@ export class Mangas {
     return {
       id: safeId,
       img,
+      bookId,
       title,
       bookType,
+      status,
       author,
-      followers,
       rate,
-      views,
+      votes,
       description,
       genres,
       chapterCount: chaptersList.length,
