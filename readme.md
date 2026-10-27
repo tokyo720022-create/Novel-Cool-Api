@@ -1,6 +1,6 @@
 # NovelCool API
 
-[![NovelCool API Health Check](https://github.com/tokyo720022-create/novelcool-api/actions/workflows/novelcool-api-health.yml/badge.svg)](https://github.com/tokyo720022-create/novelcool-api/actions/workflows/novelcool-api-health.yml)
+[![NovelCool API Health Check](https://github.com/tokyo720022-create/Novel-Cool-Api/actions/workflows/novelcool-api-health.yml/badge.svg)](https://github.com/tokyo720022-create/Novel-Cool-Api/actions/workflows/novelcool-api-health.yml)
 
 An **unofficial REST API** that scrapes manga and novel listings, metadata, genres, and chapters (manga page images and novel text) from NovelCool. It uses Node.js, Express, Axios, and Cheerio.
 
@@ -27,8 +27,8 @@ An **unofficial REST API** that scrapes manga and novel listings, metadata, genr
 Clone this repository and install its dependencies:
 
 ```bash
-git clone https://github.com/tokyo720022-create/novelcool-api.git
-cd novelcool-api
+git clone https://github.com/tokyo720022-create/Novel-Cool-Api.git
+cd Novel-Cool-Api
 npm ci
 ```
 
@@ -227,7 +227,7 @@ The GitHub Actions workflow **NovelCool API Health Check** runs when relevant fi
 3. Starts the API locally in the runner.
 4. Smoke-tests the homepage, latest listings, search, genres, and a manga detail response with chapters.
 
-View the [workflow runs](https://github.com/tokyo720022-create/novelcool-api/actions).
+[View the workflow runs](https://github.com/tokyo720022-create/Novel-Cool-Api/actions)
 
 These checks validate the API running in the GitHub Actions runner; they do not, by themselves, verify that a hosted deployment is available or that every chapter image loads.
 
